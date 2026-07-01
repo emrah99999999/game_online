@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="fa">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>مسابقه چندنفره</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #222; font-family: Tahoma; }
+        canvas { display: block; }
+        #ui {
+            position: absolute; top: 10px; left: 10px; color: white;
+            background: rgba(0,0,0,0.6); padding: 10px; border-radius: 8px;
+        }
+        #leaderboard {
+            position: absolute; top: 10px; right: 10px; color: white;
+            background: rgba(0,0,0,0.7); padding: 10px; border-radius: 8px; min-width: 200px;
+        }
+        .hidden { display: none; }
+        #joinForm {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            background: white; padding: 30px; border-radius: 15px; text-align: center;
+        }
+        #joinForm input { padding: 10px; font-size: 16px; margin: 10px; }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    <div id="ui">
+        <p>زمان: <span id="timer">0</span> ثانیه</p>
+        <p>مسافت: <span id="myDistance">0</span> متر</p>
+    </div>
+    <div id="leaderboard"></div>
+    <div id="joinForm">
+        <h2>نام کاربری خود را وارد کنید</h2>
+        <input type="text" id="usernameInput" placeholder="نام شما" maxlength="15" />
+        <br/>
+        <button id="joinBtn">ورود به مسابقه</button>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+
+        // بدون آدرس، از همان دامنه‌ای که صفحه از آن آمده استفاده می‌کند (همان سرور)
+        const socket = io();
+        let myId = null;
+        let players = {};
+        let raceActive = false;
+        let raceDuration = 120;
+        let timeLeft = 0;
+        let raceInterval = null;
+
+        let audioCtx = null;
+        let engineOsc = null;
+        let engineGain = null;
+
+        function initAudio() {
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                engineOsc = audioCtx.createOscillator();
+                engineGain = audioCtx.createGain();
+                engineOsc.type = 'sawtooth';
+                engineOsc.frequency.value = 80;
+                engineGain.gain.value = 0;
+                engineOsc.connect(engineGain);
+                engineGain.connect(audioCtx.destination);
+                engineOsc.start();
+            }
+        }
+
+        function updateEngineSound(speed, topSpeed) {
+            if (!audioCtx) return;
+            const ratio = Math.min(speed / topSpeed, 1);
+            engineOsc.frequency.value = 80 + ratio * 200;
+            engineGain.gain.value = ratio * 0.08;
+        }
+
+        const keys = {
+            ArrowUp: false, ArrowDown: false, ArrowLeft: false, ArrowRight: false
+        };
+        window.addEventListener('keydown', e => {
+            if (e.key in keys) { keys[e.key] = true; e.preventDefault(); }
+        });
+        window.addEventListener('keyup', e => {
+            if (e.key in keys) { keys[e.key] = false; e.preventDefault(); }
+        });
+
+        setInterval(() => {
+            if (myId && raceActive) {
+                socket.emit('input', {
+                    accelerate: keys.ArrowUp,
+                    brake: keys.ArrowDown,
+                    left: keys.ArrowLeft,
+                    right: keys.ArrowRight
+                });
+            }
+        }, 100);
+
+        document.getElementById('joinBtn').addEventListener('click', () => {
+            const name = document.getElementById('usernameInput').value.trim() || 'بی‌نام';
+            document.getElementById('joinForm').classList.add('hidden');
+            initAudio();
+            socket.emit('join', { username: name });
+        });
+
+        socket.on('joined', data => {
+            myId = data.id;
+        });
+
+        socket.on('playerList', list => {});
+
+        socket.on('raceStart', data => {
+            raceActive = true;
+            raceDuration = data.duration;
+            timeLeft = data.duration;
+            if (raceInterval) clearInterval(raceInterval);
+            raceInterval = setInterval(() => {
+                timeLeft -= 0.1;
+                if (timeLeft < 0) timeLeft = 0;
+                document.getElementById('timer').innerText = timeLeft.toFixed(1);
+            }, 100);
+        });
+
+        socket.on('raceEnd', leaderboard => {
+            raceActive = false;
+            if (raceInterval) clearInterval(raceInterval);
+            updateEngineSound(0, 300);
+            let html = '<h3>نتایج نهایی</h3><ol>';
+            leaderboard.forEach(p => {
+                html += `<li style="color:${p.color}">${p.name}: ${Math.floor(p.distance)} متر</li>`;
+            });
+            html += '</ol>';
+            document.getElementById('leaderboard').innerHTML = html;
+        });
+
+        socket.on('gameState', state => {
+            players = state;
+            if (myId && players[myId]) {
+                document.getElementById('myDistance').innerText = Math.floor(players[myId].distance);
+                if (raceActive) {
+                    updateEngineSound(players[myId].speed, 300);
+                }
+            }
+        });
+
+        function drawTrack(camX, camY, camAngle) {
+            ctx.save();
+            ctx.translate(canvas.width/2, canvas.height/2);
+            ctx.rotate(-camAngle);
+            ctx.translate(-camX, -camY);
+
+            ctx.fillStyle = '#2d5a1e';
+            ctx.fillRect(-2000, -2000, 4000, 4000);
+
+            ctx.strokeStyle = '#444';
+            ctx.lineWidth = 200;
+            ctx.beginPath();
+            ctx.ellipse(0, 0, 800, 500, 0, 0, Math.PI*2);
+            ctx.stroke();
+
+            ctx.strokeStyle = '#FFD700';
+            ctx.lineWidth = 4;
+            ctx.setLineDash([20, 30]);
+            ctx.beginPath();
+            ctx.ellipse(0, 0, 800, 500, 0, 0, Math.PI*2);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            ctx.restore();
+        }
+
+        function drawCar(car) {
+            const { x, y, angle, color, name } = car;
+            ctx.save();
+            ctx.translate(x, y);
+            ctx.rotate(angle);
+            ctx.fillStyle = color;
+            ctx.fillRect(-20, -10, 40, 20);
+            ctx.fillStyle = '#333';
+            ctx.fillRect(-10, -8, 15, 16);
+            ctx.fillRect(10, -8, 10, 16);
+            ctx.fillStyle = 'white';
+            ctx.fillRect(18, -8, 4, 4);
+            ctx.fillRect(18, 4, 4, 4);
+            ctx.fillStyle = 'red';
+            ctx.fillRect(-24, -8, 4, 4);
+            ctx.fillRect(-24, 4, 4, 4);
+            ctx.fillStyle = 'white';
+            ctx.fillRect(-5, -30, 2, 20);
+            ctx.fillStyle = color;
+            ctx.fillRect(-5, -30, 40, 15);
+            ctx.fillStyle = 'black';
+            ctx.font = '10px Tahoma';
+            ctx.fillText(name, 0, -20);
+            ctx.restore();
+        }
+
+        function render() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            if (!myId || !players[myId]) {
+                ctx.fillStyle = 'white';
+                ctx.font = '20px Tahoma';
+                ctx.fillText('در حال اتصال...', canvas.width/2-50, canvas.height/2);
+                requestAnimationFrame(render);
+                return;
+            }
+
+            const myCar = players[myId];
+            drawTrack(myCar.x, myCar.y, myCar.angle);
+
+            const allIds = Object.keys(players);
+            allIds.sort((a,b) => a === myId ? 1 : -1);
+            allIds.forEach(id => {
+                if (id === myId) return;
+                drawCar(players[id]);
+            });
+            if (players[myId]) {
+                drawCar(players[myId]);
+                const mc = players[myId];
+                ctx.save();
+                ctx.translate(mc.x, mc.y);
+                ctx.rotate(mc.angle);
+                ctx.strokeStyle = 'white';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(-22, -12, 44, 24);
+                ctx.restore();
+            }
+
+            if (raceActive) {
+                const sorted = Object.values(players).sort((a,b) => b.distance - a.distance).slice(0, 8);
+                let html = '<h3>جدول امتیازات</h3><ol>';
+                sorted.forEach(p => {
+                    html += `<li style="color:${p.color}">${p.name}: ${Math.floor(p.distance)}</li>`;
+                });
+                html += '</ol>';
+                document.getElementById('leaderboard').innerHTML = html;
+            }
+
+            requestAnimationFrame(render);
+        }
+
+        render();
+
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        });
+    </script>
+</body>
+</html>
